@@ -1,9 +1,11 @@
 """Light terminal interface for the CABO registry."""
 import asyncio
+import os
 from collections import Counter
 
 from rich.text import Text
 from textual import on, work
+from textual.events import Click
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import (
@@ -81,6 +83,7 @@ class RegistryApp(App):
                     yield DataTable(id="master", cursor_type="row")
                     with Vertical(id="card"):
                         yield Static("Выбери заявку слева", id="card-content")
+                        yield Button("Открыть папку заявки", id="open-folder")
                         yield Button("Сформировать АПП1", id="issue")
                         yield Button("Сформировать АПП2", id="return")
                         yield Button("АПП1 отправлен", id="sent1")
@@ -208,11 +211,20 @@ class RegistryApp(App):
     @on(Button.Pressed)
     def button_pressed(self, event):
         actions = {"refresh": self.action_refresh, "issue": self.action_issue,
-                   "return": self.action_return_act,
+                   "return": self.action_return_act, "open-folder": self.open_folder,
                    "sent1": lambda: self.send(1), "sent2": lambda: self.send(2)}
         callback = actions.get(event.button.id)
         if callback:
             callback()
+
+    @on(Click, "#card-content")
+    def card_clicked(self):
+        self.open_folder()
+
+    def open_folder(self):
+        row = self.records.get(self.selected_key)
+        if row and not self.busy:
+            self.operation(lambda report: os.startfile(core.act_folder(row)), "Папка заявки открыта")
 
     def action_refresh(self):
         if not self.busy and self.registry:

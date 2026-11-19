@@ -38,8 +38,10 @@ SIZE = "Тип контейнера"
 COUNT = "Количество"
 STATUS = "Статус заявки"
 
+FOLDER_PATH = "Папка заявки"
+
 REQUEST = re.compile(
-    r"заявк[аиу]\s*№?\s*([\w/-]+)\s+от\s+(\d{1,2}\.\d{1,2}\.(?:\d{4}|\d{2}))(?!\d)", re.I
+    r"заявк[аиу]\s*№?\s*([\w/-]+)\s*от\s*(\d{1,2}\.\d{1,2}\.(?:\d{4}|\d{2}))(?!\d)", re.I
 )
 BOX = re.compile(r"[A-Z]{4}\d{7}")
 TYPE = re.compile(r"(?<!\d)(20|40)\s*['’′-]?\s*(DC|HC)\b", re.I)
@@ -102,43 +104,76 @@ def client_folder(company):
     return matches[0] if len(matches) == 1 else CLIENTS / safe_component(alias)
 
 
+SKIP_FOLDERS = {"templates", "assets", "build", "dist", ".git", ".venv", "__pycache__"}
+
+
+def walk_folders(folder, report=None):
+    def failed(error):
+        if report:
+            report(f"Не удалось прочитать папку: {error.filename} — {error}")
+    for root, directories, files in os.walk(folder, onerror=failed, followlinks=False):
+        directories[:] = sorted(name for name in directories
+                                if name.casefold() not in SKIP_FOLDERS
+                                and not name.casefold().startswith("neco-registry"))
+        yield Path(root), files
+
+
 def request_folders(folder):
-    for path in sorted(folder.iterdir()):
-        if path.is_dir() and REQUEST.match(path.name):
-            try:
-                identifier = request_id(path.name)
-            except ValueError:
-                continue
+    for path, files in walk_folders(folder):
+        identifiers = set()
+        try:
+            identifiers.add(request_id(path.name))
+        except ValueError:
+            for name in files:
+                if Path(name).suffix.casefold() in {".pdf", ".docx"} and REQUEST.match(name):
+                    try:
+                        identifiers.add(request_id(Path(name).stem))
+                    except ValueError:
+                        pass
+        for identifier in sorted(identifiers):
             yield identifier, path
 
 
 def act_folder(row):
+    stored = clean(row.get(FOLDER_PATH))
+    if stored:
+        path = Path(stored)
+        if not path.is_absolute():
+            path = CLIENTS / path
+        if path.is_dir():
+            return path
+        raise ValueError(f"Папка заявки недоступна: {path}. Обновите реестр")
     folder = client_folder(row[COMPANY])
     identifier = key(row)[1:]
     matches = [path for current, path in request_folders(folder) if current == identifier] if folder.is_dir() else []
-    if len(matches) > 1:
-        raise ValueError(f"Несколько папок для заявки № {row[NUMBER]} в {folder.name}")
-    if matches:
-        return matches[0]
-    return folder / f"Заявка {safe_component(row[NUMBER])} от {ru_date(row[DATE])}"
+    if len(matches) != 1:
+        raise ValueError(f"Для заявки № {row[NUMBER]} найдено папок: {len(matches)}. Обновите реестр")
+    return matches[0]
 
 
-def request_pdfs(folder):
-    grouped = {}
-    for identifier, path in request_folders(folder):
-        grouped.setdefault(identifier, []).append(path)
-    for identifier, paths in grouped.items():
-        if len(paths) > 1:
-            yield identifier, paths[0], "Несколько папок с одним номером и датой"
-            continue
-        path = paths[0]
-        pdfs = [file for file in sorted(path.iterdir()) if file.is_file()
-                and file.suffix.casefold() == ".pdf"
-                and re.match(r"заявка\b", file.stem.replace("_", " "), re.I)]
-        if len(pdfs) != 1:
-            yield identifier, path, "Ожидается один PDF с именем, начинающимся на «Заявка»"
-        else:
-            yield identifier, pdfs[0], None
+def request_pdfs(folder, report=None):
+    for path, files in walk_folders(folder, report):
+        pdfs = [path / name for name in sorted(files) if Path(name).suffix.casefold() == ".pdf"
+                and re.match(r"заявк[аиу]", name, re.I)]
+        try:
+            folder_id = request_id(path.name)
+        except ValueError:
+            folder_id = None
+        grouped = {}
+        for pdf in pdfs:
+            try:
+                identifier = request_id(pdf.stem)
+            except ValueError:
+                identifier = folder_id
+            if identifier:
+                grouped.setdefault(identifier, []).append(pdf)
+        if folder_id and not grouped:
+            yield folder_id, path, "Нет PDF заявки; добавлены данные из названия папки"
+        for identifier, candidates in grouped.items():
+            if len(candidates) > 1:
+                yield identifier, path, "Несколько PDF заявки; добавлены данные из названия папки"
+            else:
+                yield identifier, candidates[0], None
 
 
 ISSUE_ACT = "Статус АПП выдачи"
@@ -203,21 +238,6 @@ def status(row):
         return "АПП1 подписан"
     if issue == "Ожидается подписание":
         return "АПП1 ожидает подписания"
-    try:
-        folder = act_folder(row)
-    except ValueError:
-        return "Новая заявка"
-    for name, label in (
-        ("АПП2_подписан", "Заявка закрыта"),
-        ("АПП2_отправлен.txt", "АПП2 ожидает подписания"),
-        ("АПП1_подписан", "АПП1 подписан"),
-        ("АПП1_отправлен.txt", "АПП1 ожидает подписания"),
-    ):
-        if name.endswith(".txt"):
-            if (folder / name).is_file():
-                return label
-        elif any((folder / f"{name}.{ext}").is_file() for ext in ("pdf", "docx")):
-            return label
     return "Новая заявка"
 
 
@@ -235,7 +255,7 @@ class Registry:
         missing = sorted(required - self.columns.keys())
         if missing:
             raise ValueError("Нет столбцов Excel: " + ", ".join(missing))
-        for field in (SIZE, COUNT, CITY, RETURN_COUNTRY, STATUS, ISSUE_ACT, RETURN_ACT, SIGNER_GEN, ROLE_GEN):
+        for field in (SIZE, COUNT, CITY, RETURN_COUNTRY, STATUS, ISSUE_ACT, RETURN_ACT, SIGNER_GEN, ROLE_GEN, FOLDER_PATH):
             if field not in self.columns:
                 column = self.sheet.max_column + 1
                 self.sheet.cell(1, column, field)
@@ -274,13 +294,16 @@ class Registry:
         known_by_slug = {}
         for company in known_companies:
             known_by_slug.setdefault(company_slug(company), set()).add(company)
+        scanned = 0
         for folder in sorted(CLIENTS.iterdir()):
-            if not folder.is_dir():
+            if not folder.is_dir() or folder.name.casefold() in SKIP_FOLDERS or folder.name.casefold().startswith("neco-registry"):
                 continue
-            for (number, day), path, problem in request_pdfs(folder):
+            for (number, day), path, problem in request_pdfs(folder, issues.append):
                 try:
+                    scanned += 1
+                    request_folder = path if path.is_dir() else path.parent
                     if problem:
-                        raise ValueError(problem)
+                        issues.append(f"{path.relative_to(CLIENTS)} — {problem}")
                     company = names.get(folder.name.casefold())
                     if not company:
                         matches = known_by_slug.get(company_slug(folder.name), set())
@@ -292,18 +315,30 @@ class Registry:
                         raise ValueError("Номер или дата PDF отличаются от названия папки")
                     previous = self.rows.get(key({COMPANY: company, NUMBER: number, DATE: day}))
                     if previous:
+                        index, existing = previous
+                        location = str(request_folder.relative_to(CLIENTS))
+                        if existing.get(FOLDER_PATH) and existing[FOLDER_PATH] != location:
+                            raise ValueError("Две папки с одинаковым клиентом, номером и датой; проверьте дубликат")
+                        existing[FOLDER_PATH] = location
+                        self.write(index, {FOLDER_PATH: location})
                         duplicates += 1
                         continue
-                    source = read_pdf(path)
+                    source = ""
+                    if path.is_file():
+                        try:
+                            source = read_pdf(path)
+                        except Exception as error:
+                            issues.append(f"{path.relative_to(CLIENTS)} — PDF не прочитан: {error}")
                     if REQUEST.search(clean(source)) and request_id(source) != (number, day):
-                        raise ValueError("Номер или дата в PDF отличаются от имени файла")
+                        issues.append(f"{path.relative_to(CLIENTS)} — проверьте номер и дату внутри PDF")
                     sizes = {length + kind.upper() for length, kind in TYPE.findall(source + " " + path.stem)}
                     quantities = set(re.findall(
                         r"(?:количество(?: контейнеров)?|кол-во)\s*[:–-]?\s*(\d+)|"
                         r"(\d+)\s*[xх×]\s*(?:20|40)", source + " " + path.stem, re.I
                     ))
                     counts = {int(left or right) for left, right in quantities}
-                    row = {COMPANY: company, NUMBER: number, DATE: ru_date(day)}
+                    row = {COMPANY: company, NUMBER: number, DATE: ru_date(day),
+                           FOLDER_PATH: str(request_folder.relative_to(CLIENTS))}
                     if len(sizes) == 1:
                         row[SIZE] = sizes.pop()
                     if len(counts) == 1 and min(counts) > 0:
@@ -347,7 +382,7 @@ class Registry:
                 issues.append(f"{row[COMPANY]} / № {row[NUMBER]} — {error}")
             self.write(index, {STATUS: status(row)})
         self.save()
-        report(f"Добавлено {added} · Уже в реестре {duplicates} · На проверку {len(issues)}")
+        report(f"Найдено заявок {scanned} · Добавлено {added} · Уже в реестре {duplicates} · На проверку {len(issues)}")
         for issue in issues:
             report(issue)
 
@@ -622,7 +657,8 @@ def build_act(row, act, *, signer=None, role=None, output_folder=None):
     else:
         raise ValueError("В шаблоне не найдена таблица контейнеров")
     folder = Path(output_folder) if output_folder else act_folder(row)
-    folder.mkdir(parents=True, exist_ok=True)
+    if not folder.is_dir():
+        raise ValueError(f"Папка заявки не существует: {folder}")
     target = folder / f"АПП{act}.docx"
     with target.open("xb") as handle:
         try:
@@ -675,7 +711,8 @@ try {
 
 def build_pdf_act(row, act, *, report=print):
     folder = act_folder(row)
-    folder.mkdir(parents=True, exist_ok=True)
+    if not folder.is_dir():
+        raise ValueError(f"Папка заявки не существует: {folder}")
     target = folder / f"АПП{act} - {'выдача' if act == 1 else 'сдача'}.pdf"
     if target.exists():
         raise ValueError(f"Акт уже существует: {target}. Переместите его перед повторным формированием")
