@@ -1,0 +1,16 @@
+[project]
+name = "container-registry"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["openpyxl>=3.1", "pdfplumber>=0.11", "python-docx>=1.1", "rich>=13", "gspread>=6", "textual>=0.89,<2", "pymorphy3>=2,<3"]
+
+[project.scripts]
+registry = "terminal_ui:main"
+registry-menu = "registry:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["registry", "terminal_ui"]
