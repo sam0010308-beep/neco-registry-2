@@ -263,7 +263,7 @@ class Registry:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def update(self):
+    def update(self, *, report=print):
         added = duplicates = 0
         issues = []
         if not CLIENTS.is_dir():
@@ -347,9 +347,9 @@ class Registry:
                 issues.append(f"{row[COMPANY]} / № {row[NUMBER]} — {error}")
             self.write(index, {STATUS: status(row)})
         self.save()
-        print(f"Добавлено {added} · Уже в реестре {duplicates} · На проверку {len(issues)}")
+        report(f"Добавлено {added} · Уже в реестре {duplicates} · На проверку {len(issues)}")
         for issue in issues:
-            print(issue)
+            report(issue)
 
 
 def positional_records(rows):
@@ -673,7 +673,7 @@ try {
         raise ValueError("Microsoft Word не создал корректный PDF")
 
 
-def build_pdf_act(row, act):
+def build_pdf_act(row, act, *, report=print):
     folder = act_folder(row)
     folder.mkdir(parents=True, exist_ok=True)
     target = folder / f"АПП{act} - {'выдача' if act == 1 else 'сдача'}.pdf"
@@ -696,9 +696,9 @@ def build_pdf_act(row, act):
     try:
         os.startfile(target)
     except OSError:
-        print(f"PDF сохранён: {target}. Откройте его вручную — просмотрщик не запустился")
+        report(f"PDF сохранён: {target}. Откройте его вручную — просмотрщик не запустился")
     else:
-        print(f"PDF сохранён и открыт: {target}")
+        report(f"PDF сохранён и открыт: {target}")
     return target
 
 

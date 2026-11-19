@@ -1,7 +1,6 @@
 """Light terminal interface for the CABO registry."""
-import io
+import asyncio
 from collections import Counter
-from contextlib import redirect_stdout
 
 from rich.text import Text
 from textual import on, work
@@ -102,8 +101,7 @@ class RegistryApp(App):
             self.query_one("#" + name, DataTable).add_columns("Клиент", "Заявка", "Дата", "Тип контейнера", "Количество", "Город выдачи", "Страна сдачи", "Статус")
         self.query_one("#master", DataTable).add_columns("Клиент / заявка", "Дата", "Статус")
         self.query_one("#status-table", DataTable).add_columns("Статус", "Количество")
-        self.reload()
-        self.call_after_refresh(self.action_refresh)
+        self.operation(lambda report: None, "Реестр открыт. Для проверки папок нажмите «Обновить реестр».")
 
     def feedback(self, message):
         self.query_one("#feedback", Static).update(Text(message))
@@ -218,7 +216,7 @@ class RegistryApp(App):
 
     def action_refresh(self):
         if not self.busy and self.registry:
-            self.operation(lambda: core.Registry().update(), "Реестр обновлён")
+            self.operation(lambda report: core.Registry().update(report=report), "Реестр обновлён")
 
     def action_issue(self):
         self.create_act(1)
@@ -229,24 +227,34 @@ class RegistryApp(App):
     def create_act(self, act):
         row = self.records.get(self.selected_key)
         if row and not self.busy:
-            self.operation(lambda: core.build_pdf_act(row, act), f"АПП{act} сформирован")
+            self.operation(lambda report: core.build_pdf_act(row, act, report=report), f"АПП{act} сформирован")
 
     def send(self, act):
         row = self.records.get(self.selected_key)
         if row and not self.busy:
-            self.operation(lambda: core.mark_sent(core.Registry(), row, str(act)),
+            self.operation(lambda report: core.mark_sent(core.Registry(), row, str(act)),
                            f"АПП{act} отмечен отправленным")
 
-    @work(exclusive=True)
-    async def operation(self, callback, message):
-        # Run in the app loop so stdout redirection cannot intercept terminal rendering.
+    def operation(self, callback, message):
+        if self.busy:
+            return
         self.busy = True
         self.render_card()
+        self.feedback("Выполняется операция… Интерфейс доступен.")
+        self.run_operation(callback, message)
+
+    @work(exclusive=True)
+    async def run_operation(self, callback, message):
+        def execute():
+            messages = []
+            callback(messages.append)
+            return core.Registry(), messages
+
         try:
-            with redirect_stdout(io.StringIO()) as capture:
-                callback()
-            self.reload()
-            self.feedback(capture.getvalue().strip() or message)
+            registry, messages = await asyncio.to_thread(execute)
+            self.registry = registry
+            self.render_rows()
+            self.feedback("\n".join(messages) or message)
         except Exception as error:
             self.feedback(f"Требуется проверка. {error}")
         finally:
